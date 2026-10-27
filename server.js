@@ -84,8 +84,8 @@ export async function createServer({ apiToken, store, ackTimeoutSeconds = 120 } 
         ws.on('message', raw => { events = events.then(async () => {
           let event;
           try { event = JSON.parse(raw.toString()); } catch { ws.send(JSON.stringify({ type: 'error', error: 'Invalid JSON' })); return; }
-          if (event?.type !== 'sms.result' || typeof event.messageId !== 'string' || !['sent', 'failed'].includes(event.status)) { ws.send(JSON.stringify({ type: 'error', error: 'Invalid result' })); return; }
-          const m = await store.result(id, event.messageId, event.status, event.status === 'failed' ? String(event.error ?? 'Device reported failure').slice(0, 1000) : null);
+          if (event?.type !== 'sms.result' || typeof event.messageId !== 'string' || !['sent', 'failed', 'unknown'].includes(event.status)) { ws.send(JSON.stringify({ type: 'error', error: 'Invalid result' })); return; }
+          const m = await store.result(id, event.messageId, event.status, event.status !== 'sent' ? String(event.error ?? 'Device could not confirm sending').slice(0, 1000) : null);
           if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(m ? { type: 'sms.result.ack', messageId: m.id, status: m.status } : { type: 'error', error: 'Invalid message or status transition' }));
           await dispatchAll();
         }).catch(report); });

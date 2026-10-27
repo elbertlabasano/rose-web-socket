@@ -85,4 +85,8 @@ Or:
 
 Server confirms persistence with `{"type":"sms.result.ack","messageId":"uuid","status":"sent"}`. Persist message IDs/results on the device, deduplicate commands, and retain/replay results after reconnect until acknowledged. Never blindly resend an SMS after losing connectivity. The native WebSocket client must respond to ping frames. Reconnect with backoff.
 
-The device app itself is not included. Messages contain phone numbers and SMS content; plan database backups and a retention policy before production. API and device tokens currently have no management UI or rotation endpoint. This initial service has no rate limits, bulk sending, or multi-instance support.
+Devices may also reply with `{"type":"sms.result","messageId":"uuid","status":"unknown","error":"Modem did not confirm sending"}` after an ambiguous send. These results are acknowledged and never automatically resent; a later positive result can resolve unknown. A final sent/failed status cannot be downgraded to unknown.
+
+A LILYGO A7670E LTE WebSocket client is included in [arduino/SmsGateway](arduino/SmsGateway/README.md). Configure its carrier APN and registered device token before uploading. It reports modem submission, not recipient delivery, and currently supports a conservative single-part GSM text subset. The standalone manual test remains in [arduino/SmsTest](arduino/SmsTest/README.md).
+
+Messages contain phone numbers and SMS content; plan database backups and a retention policy before production. API and device tokens currently have no management UI or rotation endpoint. This initial service has no rate limits, bulk sending, or multi-instance support.

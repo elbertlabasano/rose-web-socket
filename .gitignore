@@ -1,3 +1,6 @@
 node_modules/
 .env
 data/
+arduino/SmsGateway/Config.h
+arduino/SmsGatewayPaste/
+.arduino-build/
