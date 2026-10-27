@@ -6,7 +6,7 @@ import { WebSocket } from 'ws';
 import { createServer } from '../server.js';
 import { hash } from '../src/store.js';
 
-test('authenticated API queues, routes, persists results, and deduplicates requests', async t => {
+test('authenticated API queues, rate-limits, resumes dispatch, persists results, and deduplicates requests', { timeout: 30000 }, async t => {
   const messages = []; const registered = new Map();
   const store = {
     async ping() {}, async recover() {}, async expire() {}, async seen() {},
@@ -64,6 +64,9 @@ test('authenticated API queues, routes, persists results, and deduplicates reque
   ws.send(JSON.stringify({ type: 'sms.result', messageId: message.id, status: 'failed' }));
   assert.equal((await next()).type, 'error');
   const second = await (await call('/sms', { ...payload, requestId: 'request-2' })).json();
+  // Result acknowledgment and a new API request must not bypass the cooldown.
+  assert.equal((await (await call('/sms/' + second.id)).json()).status, 'queued');
+  // No additional API request is needed: the dispatcher wakes this job itself.
   assert.equal((await next()).messageId, second.id);
   ws.send(JSON.stringify({ type: 'sms.result', messageId: second.id, status: 'unknown', error: 'Modem send timed out' }));
   assert.equal((await next()).status, 'unknown');
