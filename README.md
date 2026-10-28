@@ -55,6 +55,12 @@ Statuses: queued → dispatched → sent or failed. `unknown` means connection l
 
 GET /health checks database availability without authentication.
 
+### SMS dispatch limit
+
+Node.js limits each device to **20 SMS jobs per minute**, with at least **3 seconds between dispatch attempts**. Messages above this rate remain queued and resume automatically; the device still handles only one outstanding job at a time. Slow modem/network responses can reduce throughput below 20/minute. Failed or unknown jobs also consume their dispatch slot; result replays and duplicate API requests do not consume another slot.
+
+The limiter retains cooldowns across device reconnects. The server waits 3 seconds after startup before dispatching, so restarting cannot bypass the minimum gap. This assumes the documented single server process; independent replicas do not share rate-limit state. The limit controls job dispatch, not handset delivery time or multipart SMS segments, and does not establish a carrier-approved sending allowance. No Arduino update or database migration is required; restart the Node.js service after deploying this change.
+
 ## Tablet protocol
 
 Connect to `ws://localhost:3000/device?deviceId=tablet-1` with the HTTP handshake header `Authorization: Bearer DEVICE_TOKEN`. Use the server's LAN address from a physical tablet. Browser WebSocket clients cannot set this header; use a native device app. Only one connection per device ID is accepted.
@@ -85,4 +91,8 @@ Or:
 
 Server confirms persistence with `{"type":"sms.result.ack","messageId":"uuid","status":"sent"}`. Persist message IDs/results on the device, deduplicate commands, and retain/replay results after reconnect until acknowledged. Never blindly resend an SMS after losing connectivity. The native WebSocket client must respond to ping frames. Reconnect with backoff.
 
-The device app itself is not included. Messages contain phone numbers and SMS content; plan database backups and a retention policy before production. API and device tokens currently have no management UI or rotation endpoint. This initial service has no rate limits, bulk sending, or multi-instance support.
+Devices may also reply with `{"type":"sms.result","messageId":"uuid","status":"unknown","error":"Modem did not confirm sending"}` after an ambiguous send. These results are acknowledged and never automatically resent; a later positive result can resolve unknown. A final sent/failed status cannot be downgraded to unknown.
+
+A LILYGO A7670E LTE WebSocket client is included in [arduino/SmsGateway](arduino/SmsGateway/README.md). Configure its carrier APN and registered device token before uploading. It reports modem submission, not recipient delivery, and currently supports a conservative single-part GSM text subset. The standalone manual test remains in [arduino/SmsTest](arduino/SmsTest/README.md).
+
+Messages contain phone numbers and SMS content; plan database backups and a retention policy before production. API and device tokens currently have no management UI or rotation endpoint. API request rate limits, bulk submission endpoints, and multi-instance support are not implemented.

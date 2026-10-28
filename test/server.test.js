@@ -6,7 +6,7 @@ import { WebSocket } from 'ws';
 import { createServer } from '../server.js';
 import { hash } from '../src/store.js';
 
-test('authenticated API queues, routes, persists results, and deduplicates requests', async t => {
+test('authenticated API queues, rate-limits, resumes dispatch, persists results, and deduplicates requests', { timeout: 30000 }, async t => {
   const messages = []; const registered = new Map();
   const store = {
     async ping() {}, async recover() {}, async expire() {}, async seen() {},
@@ -28,10 +28,10 @@ test('authenticated API queues, routes, persists results, and deduplicates reque
       const m = messages.find(m => m.status === 'queued' && (!m.requested_device_id || m.requested_device_id === id));
       if (m) Object.assign(m, { device_id: id, status: 'dispatched' }); return m;
     },
-    async result(id, mid, status) {
+    async result(id, mid, status, error) {
       const m = messages.find(m => m.id === mid && m.device_id === id);
       if (!m || !['dispatched', 'unknown', status].includes(m.status)) return;
-      m.status = status; return m;
+      m.status = status; m.error = error; return m;
     },
     async disconnect(id) { for (const m of messages) if (m.device_id === id && m.status === 'dispatched') m.status = 'unknown'; }
   };
@@ -64,9 +64,27 @@ test('authenticated API queues, routes, persists results, and deduplicates reque
   ws.send(JSON.stringify({ type: 'sms.result', messageId: message.id, status: 'failed' }));
   assert.equal((await next()).type, 'error');
   const second = await (await call('/sms', { ...payload, requestId: 'request-2' })).json();
+  // Result acknowledgment and a new API request must not bypass the cooldown.
+  assert.equal((await (await call('/sms/' + second.id)).json()).status, 'queued');
+  // No additional API request is needed: the dispatcher wakes this job itself.
   assert.equal((await next()).messageId, second.id);
+  ws.send(JSON.stringify({ type: 'sms.result', messageId: second.id, status: 'unknown', error: 'Modem send timed out' }));
+  assert.equal((await next()).status, 'unknown');
+  assert.equal((await store.get(second.id)).error, 'Modem send timed out');
+  // Unknown results are replayable, and later positive confirmation resolves them.
+  ws.send(JSON.stringify({ type: 'sms.result', messageId: second.id, status: 'unknown', error: 'Modem send timed out' }));
+  assert.equal((await next()).status, 'unknown');
+  ws.send(JSON.stringify({ type: 'sms.result', messageId: second.id, status: 'sent' }));
+  assert.equal((await next()).status, 'sent');
+  ws.send(JSON.stringify({ type: 'sms.result', messageId: second.id, status: 'sent' }));
+  assert.equal((await next()).status, 'sent');
+  ws.send(JSON.stringify({ type: 'sms.result', messageId: second.id, status: 'unknown' }));
+  assert.equal((await next()).type, 'error');
+  assert.equal((await store.get(second.id)).status, 'sent');
+  const third = await (await call('/sms', { ...payload, requestId: 'request-3' })).json();
+  assert.equal((await next()).messageId, third.id);
   ws.close(); await once(ws, 'close');
   // Close-event reconciliation is asynchronous.
-  for (let i = 0; i < 20 && (await store.get(second.id)).status !== 'unknown'; i++) await new Promise(resolve => setTimeout(resolve, 10));
-  assert.equal((await store.get(second.id)).status, 'unknown');
+  for (let i = 0; i < 20 && (await store.get(third.id)).status !== 'unknown'; i++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal((await store.get(third.id)).status, 'unknown');
 });

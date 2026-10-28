@@ -4,122 +4,381 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
 import { createStore, hash } from './src/store.js';
+import { createDispatchLimiter } from './src/dispatch-limiter.js';
+
 const devicePattern = /^[a-zA-Z0-9_-]{1,100}$/;
-const equal = (a, b) => timingSafeEqual(Buffer.from(hash(a)), Buffer.from(hash(b)));
-export function publicMessage(m) {
-  return { id: m.id, requestId: m.request_id, deviceId: m.device_id ?? m.requested_device_id, to: m.recipient, body: m.body, status: m.status, error: m.error, createdAt: m.created_at, updatedAt: m.updated_at, sentAt: m.sent_at };
+const requestIdPattern = /^[\x21-\x7e]{1,200}$/;
+const phonePattern = /^\+[1-9]\d{6,14}$/;
+const resultStatuses = ['sent', 'failed', 'unknown'];
+const maxPayloadBytes = 16384;
+
+function equal(a, b) {
+  return timingSafeEqual(Buffer.from(hash(a)), Buffer.from(hash(b)));
 }
-export async function createServer({ apiToken, store, ackTimeoutSeconds = 120 } = {}) {
-  if (!apiToken || apiToken.length < 24) throw new Error('API_TOKEN must contain at least 24 characters');
+
+function report(error) {
+  console.error('SMS service error:', error.code || error.message);
+}
+
+function sendJson(response, statusCode, body) {
+  response.writeHead(statusCode, { 'Content-Type': 'application/json' });
+  response.end(JSON.stringify(body));
+}
+
+function sendEvent(socket, event) {
+  socket.send(JSON.stringify(event));
+}
+
+async function readJsonBody(request, response) {
+  let size = 0;
+  const chunks = [];
+  for await (const chunk of request) {
+    size += chunk.length;
+    if (size > maxPayloadBytes) {
+      sendJson(response, 413, { error: 'Request too large' });
+      return;
+    }
+    chunks.push(chunk);
+  }
+
+  let input;
+  try {
+    input = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  } catch {
+    sendJson(response, 400, { error: 'Invalid JSON' });
+    return;
+  }
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    sendJson(response, 400, { error: 'Expected a JSON object' });
+    return;
+  }
+  return input;
+}
+
+function validSmsRequest({ deviceId, to, body, requestId }) {
+  return (
+    typeof requestId === 'string' && requestIdPattern.test(requestId) &&
+    typeof to === 'string' && phonePattern.test(to) &&
+    typeof body === 'string' && body.trim() && body.length <= 1600 &&
+    (deviceId === undefined || (typeof deviceId === 'string' && devicePattern.test(deviceId)))
+  );
+}
+
+export function publicMessage(message) {
+  return {
+    id: message.id,
+    requestId: message.request_id,
+    deviceId: message.device_id ?? message.requested_device_id,
+    to: message.recipient,
+    body: message.body,
+    status: message.status,
+    error: message.error,
+    createdAt: message.created_at,
+    updatedAt: message.updated_at,
+    sentAt: message.sent_at
+  };
+}
+
+export async function createServer({
+  apiToken,
+  store,
+  ackTimeoutSeconds = 120,
+  dispatchLimiter = createDispatchLimiter()
+} = {}) {
+  if (!apiToken || apiToken.length < 24) {
+    throw new Error('API_TOKEN must contain at least 24 characters');
+  }
   await store.ping();
   await store.recover();
+
   const devices = new Map();
   const dispatching = new Set();
   const pending = new Set();
-  const track = promise => { pending.add(promise); promise.finally(() => pending.delete(promise)).catch(() => {}); return promise; };
   let stopping = false;
-  const report = error => console.error('SMS service error:', error.code || error.message);
-  async function dispatch(id) {
-    if (stopping || dispatching.has(id)) return;
-    const ws = devices.get(id);
-    if (ws?.readyState !== WebSocket.OPEN) return;
-    dispatching.add(id);
-    try {
-      const m = await store.claim(id);
-      if (m) {
-        if (ws.readyState !== WebSocket.OPEN) await store.disconnect(id);
-        else ws.send(JSON.stringify({ type: 'sms.send', messageId: m.id, to: m.recipient, body: m.body }));
-      }
-    } finally { dispatching.delete(id); }
-  }
-  const dispatchAll = () => Promise.all([...devices.keys()].map(dispatch));
-  const send = (res, code, body) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(body)); };
-  const server = http.createServer(async (req, res) => {
-    try {
-      const url = new URL(req.url, 'http://localhost');
-      if (url.pathname === '/health' && req.method === 'GET') { await store.ping(); return send(res, 200, { ok: true }); }
-      if (!equal(req.headers.authorization || '', `Bearer ${apiToken}`)) return send(res, 401, { error: 'Unauthorized' });
-      if (url.pathname === '/devices' && req.method === 'GET') return send(res, 200, { devices: (await store.devices()).map(d => ({ id: d.id, name: d.name, lastSeenAt: d.last_seen_at, connected: devices.has(d.id) })) });
-      if (url.pathname.startsWith('/sms/') && req.method === 'GET') {
-        const m = await store.get(url.pathname.slice(5));
-        return send(res, m ? 200 : 404, m ? publicMessage(m) : { error: 'Message not found' });
-      }
-      if (!['/sms', '/devices'].includes(url.pathname) || req.method !== 'POST') return send(res, 404, { error: 'Not found' });
-      let size = 0; const chunks = [];
-      for await (const chunk of req) { size += chunk.length; if (size > 16384) return send(res, 413, { error: 'Request too large' }); chunks.push(chunk); }
-      let input;
-      try { input = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { return send(res, 400, { error: 'Invalid JSON' }); }
-      if (!input || typeof input !== 'object' || Array.isArray(input)) return send(res, 400, { error: 'Expected a JSON object' });
-      if (url.pathname === '/devices') {
-        if (!devicePattern.test(input.id ?? '') || typeof input.name !== 'string' || !input.name.trim() || input.name.length > 200) return send(res, 400, { error: 'Provide device id and name' });
-        const token = randomBytes(32).toString('hex');
-        try { await store.register(input.id, input.name, token); } catch (e) { if (e.code === 'ER_DUP_ENTRY') return send(res, 409, { error: 'Device already exists' }); throw e; }
-        return send(res, 201, { id: input.id, token });
-      }
-      const { deviceId, to, body, requestId } = input;
-      if (typeof requestId !== 'string' || !/^[\x21-\x7e]{1,200}$/.test(requestId) || typeof to !== 'string' || !/^\+[1-9]\d{6,14}$/.test(to) || typeof body !== 'string' || !body.trim() || body.length > 1600 || (deviceId !== undefined && (typeof deviceId !== 'string' || !devicePattern.test(deviceId)))) return send(res, 400, { error: 'Provide requestId (1–200 printable ASCII characters), to (+ international number), body (1–1600 characters), and optional deviceId' });
-      if (deviceId && !await store.device(deviceId)) return send(res, 404, { error: 'Device not found' });
-      const result = await store.enqueue(input);
-      send(res, result.created ? 202 : 200, publicMessage(result.message));
-      track(dispatchAll()).catch(report);
-    } catch (error) { report(error); if (!res.headersSent) send(res, error.status || 500, { error: error.status ? error.message : 'Internal server error' }); }
-  });
-  server.requestTimeout = 15000;
-  const wss = new WebSocketServer({ noServer: true, maxPayload: 16384 });
-  server.on('upgrade', (req, socket, head) => {
-    socket.on('error', () => {});
-    (async () => {
-      const url = new URL(req.url, 'http://localhost');
-      const id = url.searchParams.get('deviceId');
-      const d = devicePattern.test(id ?? '') ? await store.device(id) : undefined;
-      const auth = req.headers.authorization || '';
-      if (stopping || url.pathname !== '/device' || !d || !auth.startsWith('Bearer ') || !equal(hash(auth.slice(7)), d.token_hash)) { socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n'); return; }
-      if (devices.has(id)) { socket.end('HTTP/1.1 409 Conflict\r\nConnection: close\r\n\r\n'); return; }
-      wss.handleUpgrade(req, socket, head, ws => {
-        devices.set(id, ws); ws.alive = true;
-        ws.on('pong', () => { ws.alive = true; store.seen(id).catch(report); });
-        ws.on('error', report);
-        // Serialize device events so disconnect reconciliation follows outstanding results.
-        let events = Promise.resolve();
-        ws.on('message', raw => { events = events.then(async () => {
-          let event;
-          try { event = JSON.parse(raw.toString()); } catch { ws.send(JSON.stringify({ type: 'error', error: 'Invalid JSON' })); return; }
-          if (event?.type !== 'sms.result' || typeof event.messageId !== 'string' || !['sent', 'failed'].includes(event.status)) { ws.send(JSON.stringify({ type: 'error', error: 'Invalid result' })); return; }
-          const m = await store.result(id, event.messageId, event.status, event.status === 'failed' ? String(event.error ?? 'Device reported failure').slice(0, 1000) : null);
-          if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(m ? { type: 'sms.result.ack', messageId: m.id, status: m.status } : { type: 'error', error: 'Invalid message or status transition' }));
-          await dispatchAll();
-        }).catch(report); });
-        ws.on('close', () => { events = track(events.then(async () => { await store.disconnect(id); devices.delete(id); })).catch(report); });
-        ws.send(JSON.stringify({ type: 'device.ready', deviceId: id }));
-        track(store.seen(id).then(dispatchAll)).catch(report);
-      });
-    })().catch(error => { report(error); socket.destroy(); });
-  });
   let ticking = false;
-  const timer = setInterval(async () => {
+
+  function track(promise) {
+    pending.add(promise);
+    promise.finally(() => pending.delete(promise)).catch(() => {});
+    return promise;
+  }
+
+  async function dispatch(deviceId) {
+    if (stopping || dispatching.has(deviceId) || !dispatchLimiter.ready(deviceId)) return;
+    const socket = devices.get(deviceId);
+    if (socket?.readyState !== WebSocket.OPEN) return;
+
+    dispatching.add(deviceId);
+    try {
+      const message = await store.claim(deviceId);
+      if (!message) return;
+      if (socket.readyState !== WebSocket.OPEN) {
+        await store.disconnect(deviceId);
+        return;
+      }
+
+      // Failed/unknown attempts consume a rate-limit slot too.
+      dispatchLimiter.dispatched(deviceId);
+      sendEvent(socket, {
+        type: 'sms.send',
+        messageId: message.id,
+        to: message.recipient,
+        body: message.body
+      });
+    } finally {
+      dispatching.delete(deviceId);
+    }
+  }
+
+  function dispatchAll() {
+    return Promise.all([...devices.keys()].map(dispatch));
+  }
+
+  async function listDevices(response) {
+    const registered = await store.devices();
+    sendJson(response, 200, {
+      devices: registered.map(device => ({
+        id: device.id,
+        name: device.name,
+        lastSeenAt: device.last_seen_at,
+        connected: devices.has(device.id)
+      }))
+    });
+  }
+
+  async function registerDevice(input, response) {
+    if (
+      !devicePattern.test(input.id ?? '') ||
+      typeof input.name !== 'string' ||
+      !input.name.trim() ||
+      input.name.length > 200
+    ) {
+      return sendJson(response, 400, { error: 'Provide device id and name' });
+    }
+    const token = randomBytes(32).toString('hex');
+    try {
+      await store.register(input.id, input.name, token);
+    } catch (error) {
+      if (error.code === 'ER_DUP_ENTRY') {
+        return sendJson(response, 409, { error: 'Device already exists' });
+      }
+      throw error;
+    }
+    sendJson(response, 201, { id: input.id, token });
+  }
+
+  async function enqueueSms(input, response) {
+    if (!validSmsRequest(input)) {
+      return sendJson(response, 400, {
+        error: 'Provide requestId (1–200 printable ASCII characters), to (+ international number), body (1–1600 characters), and optional deviceId'
+      });
+    }
+    if (input.deviceId && !await store.device(input.deviceId)) {
+      return sendJson(response, 404, { error: 'Device not found' });
+    }
+    const result = await store.enqueue(input);
+    sendJson(response, result.created ? 202 : 200, publicMessage(result.message));
+    track(dispatchAll()).catch(report);
+  }
+
+  async function handleHttpRequest(request, response) {
+    try {
+      const { pathname } = new URL(request.url, 'http://localhost');
+      const method = request.method;
+      if (pathname === '/health' && method === 'GET') {
+        await store.ping();
+        return sendJson(response, 200, { ok: true });
+      }
+      if (!equal(request.headers.authorization || '', 'Bearer ' + apiToken)) {
+        return sendJson(response, 401, { error: 'Unauthorized' });
+      }
+      if (pathname === '/devices' && method === 'GET') {
+        return await listDevices(response);
+      }
+      if (pathname.startsWith('/sms/') && method === 'GET') {
+        const message = await store.get(pathname.slice(5));
+        return sendJson(
+          response,
+          message ? 200 : 404,
+          message ? publicMessage(message) : { error: 'Message not found' }
+        );
+      }
+      if (!['/sms', '/devices'].includes(pathname) || method !== 'POST') {
+        return sendJson(response, 404, { error: 'Not found' });
+      }
+
+      const input = await readJsonBody(request, response);
+      if (!input) return;
+      if (pathname === '/devices') {
+        return await registerDevice(input, response);
+      }
+      await enqueueSms(input, response);
+    } catch (error) {
+      report(error);
+      if (!response.headersSent) {
+        sendJson(response, error.status || 500, {
+          error: error.status ? error.message : 'Internal server error'
+        });
+      }
+    }
+  }
+
+  async function handleDeviceResult(deviceId, socket, raw) {
+    let event;
+    try {
+      event = JSON.parse(raw.toString());
+    } catch {
+      return sendEvent(socket, { type: 'error', error: 'Invalid JSON' });
+    }
+    if (
+      event?.type !== 'sms.result' ||
+      typeof event.messageId !== 'string' ||
+      !resultStatuses.includes(event.status)
+    ) {
+      return sendEvent(socket, { type: 'error', error: 'Invalid result' });
+    }
+
+    const error = event.status === 'sent'
+      ? null
+      : String(event.error ?? 'Device could not confirm sending').slice(0, 1000);
+    const message = await store.result(deviceId, event.messageId, event.status, error);
+    if (socket.readyState === WebSocket.OPEN) {
+      sendEvent(socket, message
+        ? { type: 'sms.result.ack', messageId: message.id, status: message.status }
+        : { type: 'error', error: 'Invalid message or status transition' });
+    }
+    await dispatchAll();
+  }
+
+  function connectDevice(deviceId, socket) {
+    devices.set(deviceId, socket);
+    socket.alive = true;
+    socket.on('error', report);
+    socket.on('pong', () => {
+      socket.alive = true;
+      store.seen(deviceId).catch(report);
+    });
+
+    // Process results before reconciling a following disconnect.
+    let events = Promise.resolve();
+    socket.on('message', raw => {
+      events = events.then(() => handleDeviceResult(deviceId, socket, raw)).catch(report);
+    });
+    socket.on('close', () => {
+      events = track(events.then(async () => {
+        await store.disconnect(deviceId);
+        devices.delete(deviceId);
+      })).catch(report);
+    });
+    sendEvent(socket, { type: 'device.ready', deviceId });
+    track(store.seen(deviceId).then(dispatchAll)).catch(report);
+  }
+
+  async function handleUpgrade(request, socket, head) {
+    const url = new URL(request.url, 'http://localhost');
+    const deviceId = url.searchParams.get('deviceId');
+    const device = devicePattern.test(deviceId ?? '')
+      ? await store.device(deviceId)
+      : undefined;
+    const authorization = request.headers.authorization || '';
+    if (
+      stopping || url.pathname !== '/device' || !device ||
+      !authorization.startsWith('Bearer ') ||
+      !equal(hash(authorization.slice(7)), device.token_hash)
+    ) {
+      socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
+      return;
+    }
+    if (devices.has(deviceId)) {
+      socket.end('HTTP/1.1 409 Conflict\r\nConnection: close\r\n\r\n');
+      return;
+    }
+    wss.handleUpgrade(request, socket, head, client => connectDevice(deviceId, client));
+  }
+
+  async function checkConnections() {
     if (ticking || stopping) return;
     ticking = true;
     try {
-      for (const ws of devices.values()) { if (!ws.alive) ws.terminate(); else { ws.alive = false; ws.ping(); } }
-      await store.expire(ackTimeoutSeconds); await dispatchAll();
-    } catch (error) { report(error); } finally { ticking = false; }
-  }, 10000);
-  timer.unref();
-  return { server, async close() {
-    stopping = true; clearInterval(timer);
-    const closed = [...devices.values()].map(ws => new Promise(resolve => { ws.once('close', resolve); ws.terminate(); }));
+      for (const socket of devices.values()) {
+        if (!socket.alive) {
+          socket.terminate();
+        } else {
+          socket.alive = false;
+          socket.ping();
+        }
+      }
+      await store.expire(ackTimeoutSeconds);
+      await dispatchAll();
+    } catch (error) {
+      report(error);
+    } finally {
+      ticking = false;
+    }
+  }
+
+  const server = http.createServer(handleHttpRequest);
+  server.requestTimeout = 15000;
+  const wss = new WebSocketServer({ noServer: true, maxPayload: maxPayloadBytes });
+  server.on('upgrade', (request, socket, head) => {
+    socket.on('error', () => {});
+    handleUpgrade(request, socket, head).catch(error => {
+      report(error);
+      socket.destroy();
+    });
+  });
+
+  const heartbeatTimer = setInterval(checkConnections, 10000);
+  heartbeatTimer.unref();
+
+  // Resume queued jobs after their cooldown, independently of the heartbeat.
+  const dispatchTimer = setInterval(() => {
+    if (!stopping) track(dispatchAll()).catch(report);
+  }, 1000);
+  dispatchTimer.unref();
+
+  async function close() {
+    stopping = true;
+    clearInterval(heartbeatTimer);
+    clearInterval(dispatchTimer);
+    const closed = [...devices.values()].map(socket => new Promise(resolve => {
+      socket.once('close', resolve);
+      socket.terminate();
+    }));
     await Promise.all(closed);
     await new Promise(resolve => server.close(resolve));
     while (pending.size) await Promise.allSettled([...pending]);
     wss.close();
-  } };
+  }
+
+  return { server, close };
 }
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+
+async function startServer() {
   const store = createStore();
   try {
     const app = await createServer({ apiToken: process.env.API_TOKEN, store });
-    app.server.listen(Number(process.env.PORT || 3000), process.env.HOST || '0.0.0.0', () => console.log('SMS service listening on port', process.env.PORT || 3000));
+    const port = Number(process.env.PORT || 3000);
+    const host = process.env.HOST || '0.0.0.0';
+    app.server.listen(port, host, () => console.log('SMS service listening on port', port));
+
     let closing = false;
-    for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, async () => { if (closing) return; closing = true; await app.close(); await store.close(); });
-  } catch (error) { console.error('Startup failed:', error.code || error.message); await store.close(); process.exitCode = 1; }
+    async function shutdown() {
+      if (closing) return;
+      closing = true;
+      await app.close();
+      await store.close();
+    }
+    for (const signal of ['SIGINT', 'SIGTERM']) {
+      process.on(signal, shutdown);
+    }
+  } catch (error) {
+    console.error('Startup failed:', error.code || error.message);
+    await store.close();
+    process.exitCode = 1;
+  }
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  startServer();
 }
