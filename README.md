@@ -1,6 +1,6 @@
 # Rose SMS service
 
-Standalone Node.js HTTP API + WebSocket gateway with MySQL persistence. Requires Node 20.11+ and MySQL 8+ (SKIP LOCKED). Run one service process; multiple replicas require shared device ownership and dispatch coordination.
+Standalone Node.js HTTP API + WebSocket gateway with MySQL persistence. Requires Node 20.11+ and MySQL 8+ or MariaDB 10.4+. Run one service process; multiple replicas require shared device ownership and dispatch coordination.
 
 ## Setup
 

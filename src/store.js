@@ -31,7 +31,9 @@ export function createStore(env = process.env) {
         await connection.execute('SELECT id FROM devices WHERE id = ? FOR UPDATE', [deviceId]);
         const [busy] = await connection.execute("SELECT id FROM messages WHERE device_id = ? AND status = 'dispatched' LIMIT 1", [deviceId]);
         if (busy.length) { await connection.commit(); return; }
-        const [rows] = await connection.execute("SELECT id FROM messages WHERE status = 'queued' AND (requested_device_id IS NULL OR requested_device_id = ?) ORDER BY created_at, id LIMIT 1 FOR UPDATE SKIP LOCKED", [deviceId]);
+        // The device lock above serializes claims for a device. A plain locking
+        // read also works on MariaDB 10.4, which does not support SKIP LOCKED.
+        const [rows] = await connection.execute("SELECT id FROM messages WHERE status = 'queued' AND (requested_device_id IS NULL OR requested_device_id = ?) ORDER BY created_at, id LIMIT 1 FOR UPDATE", [deviceId]);
         if (!rows.length) { await connection.commit(); return; }
         await connection.execute("UPDATE messages SET device_id = ?, status = 'dispatched', dispatched_at = UTC_TIMESTAMP(3) WHERE id = ?", [deviceId, rows[0].id]);
         await connection.commit();
