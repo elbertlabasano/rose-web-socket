@@ -14,12 +14,14 @@ export function createStore(env = process.env) {
     async enqueue(input) {
       try {
         const id = randomUUID();
-        await query('INSERT INTO messages (id, request_id, requested_device_id, recipient, body) VALUES (?, ?, ?, ?, ?)', [id, input.requestId, input.deviceId ?? null, input.to, input.body]);
+        await query('INSERT INTO messages (id, request_id, requested_device_id, recipient, body, source, source_id, source_request_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', [id, input.requestId, input.deviceId ?? null, input.to, input.body, input.source ?? null, input.sourceId ?? null, input.sourceRequestType ?? null]);
         return { message: await this.get(id), created: true };
       } catch (error) {
         if (error.code !== 'ER_DUP_ENTRY') throw error;
         const message = (await query('SELECT * FROM messages WHERE request_id = ?', [input.requestId]))[0];
-        if (!message || message.recipient !== input.to || message.body !== input.body || message.requested_device_id !== (input.deviceId ?? null)) throw Object.assign(new Error('requestId already used for another message'), { status: 409 });
+        if (!message || message.recipient !== input.to || message.body !== input.body || message.requested_device_id !== (input.deviceId ?? null) ||
+            (message.source ?? null) !== (input.source ?? null) || (message.source_id ?? null) !== (input.sourceId ?? null) ||
+            (message.source_request_type ?? null) !== (input.sourceRequestType ?? null)) throw Object.assign(new Error('requestId already used for another message'), { status: 409 });
         return { message, created: false };
       }
     },

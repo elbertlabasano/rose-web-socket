@@ -11,13 +11,17 @@ Standalone Node.js HTTP API + WebSocket gateway with MySQL persistence. Requires
 ```sql
 CREATE DATABASE rose_sms CHARACTER SET utf8mb4;
 CREATE USER 'rose_sms'@'localhost' IDENTIFIED BY 'choose-a-strong-password';
-GRANT SELECT, INSERT, UPDATE, CREATE, REFERENCES ON rose_sms.* TO 'rose_sms'@'localhost';
+GRANT SELECT, INSERT, UPDATE, CREATE, REFERENCES, ALTER, INDEX ON rose_sms.* TO 'rose_sms'@'localhost';
 ```
 
 Your local MySQL client is `/usr/local/mysql/bin/mysql`. Connect interactively with `/usr/local/mysql/bin/mysql -u root -p`. Do not put your password in a command argument. DB_SOCKET=/tmp/mysql.sock uses your existing local installation; remove it when using TCP or a remote database.
 
 4. Run `npm run migrate`, then `npm start`.
 5. Run `npm test` for API/WebSocket integration tests using an in-memory test store. These do not validate MySQL connectivity; migrate and a live send flow are still required against your database.
+
+For existing installations, stop the SMS service, run `npm run migrate`, then start it again. The migration adds missing source columns and their lookup index without replacing existing messages, and is safe to rerun. The migration account needs ALTER and INDEX privileges.
+
+To verify source metadata persistence and both fresh/existing schemas against your database, run `node --env-file=.env --test test/store.test.js`. This optional test uses connection-scoped temporary tables (requires CREATE TEMPORARY TABLES privilege), leaves the real queue unchanged, and sends no SMS.
 
 ## API
 
@@ -44,6 +48,21 @@ curl http://localhost:3000/sms \
 ```
 
 Returns HTTP 202 with the message ID and initial status. Optional `deviceId` targets a particular registered device; omit it to use an available device. Offline messages stay queued. Required requestId identifies one logical send: retry the same payload and ID to retrieve the existing message (HTTP 200); reusing the ID with different content returns 409.
+
+Optional source metadata links an SMS to its originating application and business record:
+
+```json
+{
+  "requestId": "branch-order-127-ready-customer",
+  "source": "branch_ordering",
+  "sourceId": "127",
+  "sourceRequestType": "order_ready",
+  "to": "+639171234567",
+  "body": "Your order is ready."
+}
+```
+
+`source` and `sourceRequestType` accept up to 100 characters; `sourceId` accepts up to 200. Use strings for IDs, including numeric IDs. Each field is optional and may be null; blank strings and other value types return HTTP 400. POST and GET message responses include these three camelCase fields (null when absent). Database columns are `source`, `source_id`, and `source_request_type`, indexed together for lookup. Multiple SMS jobs may reference the same source; `requestId` remains the globally unique send key. Retrying a requestId with different source metadata returns HTTP 409; omitted and null values are equivalent. The tablet WebSocket protocol is unchanged.
 
 ### Get status
 

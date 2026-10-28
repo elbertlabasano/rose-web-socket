@@ -55,6 +55,11 @@ async function readJsonBody(request, response) {
   return input;
 }
 
+function validOptionalSource(value, maxLength) {
+  return value === undefined || value === null ||
+    (typeof value === 'string' && value.trim().length > 0 && [...value].length <= maxLength);
+}
+
 function validSmsRequest({ deviceId, to, body, requestId }) {
   return (
     typeof requestId === 'string' && requestIdPattern.test(requestId) &&
@@ -68,6 +73,9 @@ export function publicMessage(message) {
   return {
     id: message.id,
     requestId: message.request_id,
+    source: message.source ?? null,
+    sourceId: message.source_id ?? null,
+    sourceRequestType: message.source_request_type ?? null,
     deviceId: message.device_id ?? message.requested_device_id,
     to: message.recipient,
     body: message.body,
@@ -168,6 +176,12 @@ export async function createServer({
   }
 
   async function enqueueSms(input, response) {
+    if (!validOptionalSource(input.source, 100) || !validOptionalSource(input.sourceId, 200) ||
+        !validOptionalSource(input.sourceRequestType, 100)) {
+      return sendJson(response, 400, {
+        error: 'source, sourceId, and sourceRequestType must be null or non-blank strings of at most 100, 200, and 100 characters respectively'
+      });
+    }
     if (!validSmsRequest(input)) {
       return sendJson(response, 400, {
         error: 'Provide requestId (1–200 printable ASCII characters), to (+ international number), body (1–1600 characters), and optional deviceId'

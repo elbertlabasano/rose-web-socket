@@ -17,10 +17,13 @@ test('authenticated API queues, rate-limits, resumes dispatch, persists results,
     async enqueue(i) {
       const existing = messages.find(m => m.request_id === i.requestId);
       if (existing) {
-        if (existing.body !== i.body) throw Object.assign(new Error('Conflict'), { status: 409 });
+        if (existing.body !== i.body || existing.source !== (i.source ?? null) ||
+            existing.source_id !== (i.sourceId ?? null) || existing.source_request_type !== (i.sourceRequestType ?? null)) {
+          throw Object.assign(new Error('Conflict'), { status: 409 });
+        }
         return { message: existing, created: false };
       }
-      const message = { id: randomUUID(), request_id: i.requestId, recipient: i.to, body: i.body, requested_device_id: i.deviceId ?? null, status: 'queued' };
+      const message = { id: randomUUID(), request_id: i.requestId, recipient: i.to, body: i.body, requested_device_id: i.deviceId ?? null, source: i.source ?? null, source_id: i.sourceId ?? null, source_request_type: i.sourceRequestType ?? null, status: 'queued' };
       messages.push(message); return { message, created: true };
     },
     async claim(id) {
@@ -44,10 +47,22 @@ test('authenticated API queues, rate-limits, resumes dispatch, persists results,
   assert.equal((await fetch(base + '/devices')).status, 401);
   assert.equal((await call('/sms', { body: 'invalid' })).status, 400);
   const device = await (await call('/devices', { id: 'tablet-1', name: 'Test' })).json();
-  const payload = { requestId: 'request-1', to: '+639171234567', body: 'Test' };
+  const payload = { requestId: 'request-1', to: '+639171234567', body: 'Test', source: 'branch_ordering', sourceId: '127', sourceRequestType: 'order_ready' };
+  for (const [field, limit] of [['source', 100], ['sourceId', 200], ['sourceRequestType', 100]]) {
+    for (const value of ['', '   ', 127, false, [], {}, 'x'.repeat(limit + 1)]) {
+      assert.equal((await call('/sms', { ...payload, [field]: value })).status, 400, `invalid ${field}: ${JSON.stringify(value)}`);
+    }
+  }
   const response = await call('/sms', payload);
   assert.equal(response.status, 202);
   const message = await response.json(); assert.equal(message.status, 'queued');
+  assert.equal(message.source, payload.source);
+  assert.equal(message.sourceId, payload.sourceId);
+  assert.equal(message.sourceRequestType, payload.sourceRequestType);
+  const fetched = await (await call('/sms/' + message.id)).json();
+  assert.equal(fetched.sourceId, payload.sourceId);
+  assert.equal(fetched.source, payload.source);
+  assert.equal(fetched.sourceRequestType, payload.sourceRequestType);
   const ws = new WebSocket(base.replace('http:', 'ws:') + '/device?deviceId=tablet-1', { headers: { Authorization: `Bearer ${device.token}` } });
   const inbox = []; const waiting = [];
   ws.on('message', raw => { const event = JSON.parse(raw); if (waiting.length) waiting.shift()(event); else inbox.push(event); });
@@ -61,6 +76,9 @@ test('authenticated API queues, rate-limits, resumes dispatch, persists results,
   assert.equal((await call('/sms', payload)).status, 200);
   assert.equal(messages.length, 1);
   assert.equal((await call('/sms', { ...payload, body: 'different' })).status, 409);
+  for (const field of ['source', 'sourceId', 'sourceRequestType']) {
+    assert.equal((await call('/sms', { ...payload, [field]: 'different' })).status, 409);
+  }
   ws.send(JSON.stringify({ type: 'sms.result', messageId: message.id, status: 'failed' }));
   assert.equal((await next()).type, 'error');
   const second = await (await call('/sms', { ...payload, requestId: 'request-2' })).json();
@@ -87,4 +105,15 @@ test('authenticated API queues, rate-limits, resumes dispatch, persists results,
   // Close-event reconciliation is asynchronous.
   for (let i = 0; i < 20 && (await store.get(third.id)).status !== 'unknown'; i++) await new Promise(resolve => setTimeout(resolve, 10));
   assert.equal((await store.get(third.id)).status, 'unknown');
+
+  const legacy = { requestId: 'legacy', to: payload.to, body: payload.body };
+  const legacyResponse = await call('/sms', legacy);
+  assert.equal(legacyResponse.status, 202);
+  const legacyMessage = await legacyResponse.json();
+  assert.equal(legacyMessage.source, null);
+  assert.equal(legacyMessage.sourceId, null);
+  assert.equal(legacyMessage.sourceRequestType, null);
+  assert.equal((await call('/sms', { ...legacy, source: null, sourceId: null, sourceRequestType: null })).status, 200);
+  const boundary = await call('/sms', { ...payload, requestId: 'boundary', source: 'x'.repeat(100), sourceId: 'x'.repeat(200), sourceRequestType: 'x'.repeat(100) });
+  assert.equal(boundary.status, 202);
 });
