@@ -1,6 +1,6 @@
 # Rose SMS service
 
-Standalone Node.js HTTP API + WebSocket gateway with MySQL persistence. Requires Node 20.11+ and MySQL 8+ or MariaDB 10.4+. Run one service process; multiple replicas require shared device ownership and dispatch coordination.
+Standalone Node.js HTTP API + WebSocket gateway with MySQL persistence. Requires Node 22+ and MySQL 8+ or MariaDB 10.4+. Run one service process; multiple replicas require shared device ownership and dispatch coordination.
 
 ## Setup
 
@@ -11,7 +11,7 @@ Standalone Node.js HTTP API + WebSocket gateway with MySQL persistence. Requires
 ```sql
 CREATE DATABASE rose_sms CHARACTER SET utf8mb4;
 CREATE USER 'rose_sms'@'localhost' IDENTIFIED BY 'choose-a-strong-password';
-GRANT SELECT, INSERT, UPDATE, CREATE, REFERENCES, ALTER, INDEX ON rose_sms.* TO 'rose_sms'@'localhost';
+GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, REFERENCES, ALTER, INDEX ON rose_sms.* TO 'rose_sms'@'localhost';
 ```
 
 Your local MySQL client is `/usr/local/mysql/bin/mysql`. Connect interactively with `/usr/local/mysql/bin/mysql -u root -p`. Do not put your password in a command argument. DB_SOCKET=/tmp/mysql.sock uses your existing local installation; remove it when using TCP or a remote database.
@@ -114,4 +114,11 @@ Devices may also reply with `{"type":"sms.result","messageId":"uuid","status":"u
 
 A LILYGO A7670E LTE WebSocket client is included in [arduino/SmsGateway](arduino/SmsGateway/README.md). Configure its carrier APN and registered device token before uploading. It reports modem submission, not recipient delivery, and currently supports a conservative single-part GSM text subset. The standalone manual test remains in [arduino/SmsTest](arduino/SmsTest/README.md).
 
-Messages contain phone numbers and SMS content; plan database backups and a retention policy before production. API and device tokens currently have no management UI or rotation endpoint. API request rate limits, bulk submission endpoints, and multi-instance support are not implemented.
+Messages contain phone numbers and SMS content; plan database backups and a retention policy before production. Device tokens do not yet have a management UI or rotation endpoint. API request rate limits, bulk submission endpoints, and multi-instance support are not implemented.
+
+## Administration dashboard
+
+See [Node.js SSO and dashboard setup](docs/sso.md) for the Rose Account login,
+administrator allowlist, status-only dashboard and API token manager. Existing
+API and LILYGO device credentials remain compatible. Run the migration before
+enabling `SSO_ENABLED=true`.

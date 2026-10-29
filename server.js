@@ -5,6 +5,9 @@ import { pathToFileURL } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
 import { createStore, hash } from './src/store.js';
 import { createDispatchLimiter } from './src/dispatch-limiter.js';
+import { createAdminStore } from './src/admin-store.js';
+import { createAdminWeb } from './src/admin-web.js';
+import { createSso, ssoSettings } from './src/sso.js';
 
 const devicePattern = /^[a-zA-Z0-9_-]{1,100}$/;
 const requestIdPattern = /^[\x21-\x7e]{1,200}$/;
@@ -91,7 +94,10 @@ export async function createServer({
   apiToken,
   store,
   ackTimeoutSeconds = 120,
-  dispatchLimiter = createDispatchLimiter()
+  dispatchLimiter = createDispatchLimiter(),
+  adminStore,
+  sso,
+  webSettings
 } = {}) {
   if (!apiToken || apiToken.length < 24) {
     throw new Error('API_TOKEN must contain at least 24 characters');
@@ -104,6 +110,12 @@ export async function createServer({
   const pending = new Set();
   let stopping = false;
   let ticking = false;
+  const adminWeb = adminStore && sso && webSettings ? createAdminWeb({
+    store: adminStore, sso, settings: webSettings,
+    getDevices: async () => (await store.devices()).map(device => ({
+      id: device.id, name: device.name, last_seen_at: device.last_seen_at, connected: devices.has(device.id)
+    }))
+  }) : undefined;
 
   function track(promise) {
     pending.add(promise);
@@ -199,11 +211,17 @@ export async function createServer({
     try {
       const { pathname } = new URL(request.url, 'http://localhost');
       const method = request.method;
+      if (adminWeb && await adminWeb(request, response)) return;
       if (pathname === '/health' && method === 'GET') {
         await store.ping();
         return sendJson(response, 200, { ok: true });
       }
-      if (!equal(request.headers.authorization || '', 'Bearer ' + apiToken)) {
+      const authorization = request.headers.authorization || '';
+      const legacyAuthorized = equal(authorization, 'Bearer ' + apiToken);
+      const managedRoute = (pathname === '/sms' && method === 'POST') || (pathname.startsWith('/sms/') && method === 'GET');
+      const managedAuthorized = !legacyAuthorized && managedRoute && authorization.startsWith('Bearer sms_') &&
+        authorization.length < 200 && adminStore && await adminStore.authenticateToken(authorization.slice(7));
+      if (!legacyAuthorized && !managedAuthorized) {
         return sendJson(response, 401, { error: 'Unauthorized' });
       }
       if (pathname === '/devices' && method === 'GET') {
@@ -371,7 +389,11 @@ export async function createServer({
 async function startServer() {
   const store = createStore();
   try {
-    const app = await createServer({ apiToken: process.env.API_TOKEN, store });
+    const enabled = process.env.SSO_ENABLED === 'true';
+    const settings = enabled ? ssoSettings() : undefined;
+    const app = await createServer({ apiToken: process.env.API_TOKEN, store,
+      adminStore: enabled ? createAdminStore(store.pool) : undefined,
+      sso: enabled ? createSso(settings) : undefined, webSettings: settings });
     const port = Number(process.env.PORT || 3000);
     const host = process.env.HOST || '0.0.0.0';
     app.server.listen(port, host, () => console.log('SMS service listening on port', port));

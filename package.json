@@ -9,10 +9,14 @@
     "migrate": "node --env-file=.env scripts/migrate.js"
   },
   "engines": {
-    "node": ">=20.11"
+    "node": ">=22"
   },
   "dependencies": {
     "mysql2": "^3.24.6",
+    "openid-client": "^6.8.4",
     "ws": "^8.22.0"
+  },
+  "devDependencies": {
+    "jose": "^6.2.14"
   }
 }
