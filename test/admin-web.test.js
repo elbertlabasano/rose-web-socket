@@ -40,8 +40,8 @@ test('admin pages enforce SSO allowlist, CSRF, session revocation and restricted
   t.after(() => app.close());
   const base = 'http://127.0.0.1:' + app.server.address().port;
   const get = (path, cookie) => fetch(base + path, { redirect: 'manual', headers: cookie ? { Cookie: cookie } : {} });
-  const post = (path, body, cookie, origin = settings.origin) => fetch(base + path, { method: 'POST', redirect: 'manual',
-    headers: { Cookie: cookie, Origin: origin, 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(body) });
+  const post = (path, body, cookie, origin = settings.origin, fetchSite) => fetch(base + path, { method: 'POST', redirect: 'manual',
+    headers: { Cookie: cookie, Origin: origin, ...(fetchSite ? { 'Sec-Fetch-Site': fetchSite } : {}), 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(body) });
   const cookie = response => response.headers.get('set-cookie').split(';')[0];
   async function login() {
     const begin = await get('/auth/keycloak/redirect');
@@ -63,6 +63,7 @@ test('admin pages enforce SSO allowlist, CSRF, session revocation and restricted
   assert.equal((await get('/login', adminCookie)).headers.get('location'), '/dashboard');
   assert.equal((await post('/dashboard/tokens', { action: 'create', name: 'Orders', days: '30' }, adminCookie)).status, 403);
   assert.equal((await post('/dashboard/tokens', { csrf, action: 'create', name: 'Orders', days: '30' }, adminCookie, 'https://evil.example')).status, 403);
+  assert.equal((await post('/dashboard/tokens', { csrf, action: 'create', name: 'Orders', days: '30' }, adminCookie, 'null', 'cross-site')).status, 403);
   const created = await post('/dashboard/tokens', { csrf, action: 'create', name: '<Orders>', days: '30' }, adminCookie);
   assert.equal(created.status, 201);
   const secret = [...tokens.values()][0].secret;
@@ -87,6 +88,6 @@ test('admin pages enforce SSO allowlist, CSRF, session revocation and restricted
   const loginCookie = cookie(start);
   await get('/auth/keycloak/callback?code=test', loginCookie);
   assert.equal((await get('/auth/keycloak/callback?code=test', loginCookie)).status, 400);
-  await post('/auth/keycloak/logout', { csrf }, adminCookie);
+  assert.equal((await post('/auth/keycloak/logout', { csrf }, adminCookie, 'null', 'same-origin')).status, 303);
   assert.equal((await get('/dashboard', adminCookie)).headers.get('location'), '/login');
 });

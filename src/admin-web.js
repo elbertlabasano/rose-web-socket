@@ -92,7 +92,23 @@ export function createAdminWeb({ store, sso, settings, getDevices }) {
       } else if (request.method === 'POST' && ['/dashboard/tokens', '/dashboard/admins', '/auth/keycloak/logout'].includes(path)) {
         if (!authenticated) { html(response, 401, 'error', { message: 'Sign in before continuing.' }); return true; }
         const form = await readForm(request);
-        if (request.headers.origin !== settings.origin || !equal(form.get('csrf'), session.csrf)) throw Object.assign(new Error('The form expired. Reload the page and try again.'), { status: 403 });
+        const submittedCsrf = form.get('csrf');
+        const requestOrigin = request.headers.origin;
+        const fetchSite = request.headers['sec-fetch-site'];
+        const originValid = requestOrigin === settings.origin ||
+          ((!requestOrigin || requestOrigin === 'null') && fetchSite === 'same-origin');
+        const csrfValid = equal(submittedCsrf, session.csrf);
+        if (!originValid || !csrfValid) {
+          console.warn('Admin form rejected', JSON.stringify({
+            path,
+            origin: requestOrigin || null,
+            expectedOrigin: settings.origin,
+            fetchSite: fetchSite || null,
+            csrfPresent: Boolean(submittedCsrf),
+            csrfValid
+          }));
+          throw Object.assign(new Error('The form expired. Reload the page and try again.'), { status: 403 });
+        }
         if (path === '/auth/keycloak/logout') {
           await store.deleteSession(sid);
           setCookie(response, '', 0);
