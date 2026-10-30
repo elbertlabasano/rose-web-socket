@@ -33,17 +33,25 @@ export function createAdminWeb({ store, sso, settings, getDevices }) {
   return async (request, response) => {
     const url = new URL(request.url, settings.origin);
     const path = url.pathname;
-    if (!['/', '/login', '/auth/keycloak/redirect', '/auth/keycloak/callback', '/auth/keycloak/logout', '/dashboard', '/dashboard/tokens', '/dashboard/admins', '/assets/admin.css', '/assets/admin.js'].includes(path)) return false;
+    if (!['/', '/login', '/auth/keycloak/redirect', '/auth/keycloak/callback', '/auth/keycloak/logout', '/dashboard', '/dashboard/tokens', '/dashboard/admins', '/assets/admin.css', '/assets/admin.js', '/assets/rose-logo.png', '/assets/Courgette-Regular.ttf', '/assets/Outfit-Variable.ttf'].includes(path)) return false;
     response.setHeader('Cache-Control', 'no-store');
     response.setHeader('X-Content-Type-Options', 'nosniff');
     response.setHeader('Referrer-Policy', 'no-referrer');
-    response.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
+    response.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self'; font-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
     let session;
     try {
       if (path.startsWith('/assets/')) {
         if (request.method !== 'GET') { response.writeHead(405); response.end(); return true; }
-        response.writeHead(200, { 'Content-Type': path.endsWith('.css') ? 'text/css; charset=utf-8' : 'text/javascript; charset=utf-8' });
-        response.end(await readFile(new URL('../public/' + path.slice(8), import.meta.url)));
+        const assets = {
+          '/assets/admin.css': ['admin.css', 'text/css; charset=utf-8'],
+          '/assets/admin.js': ['admin.js', 'text/javascript; charset=utf-8'],
+          '/assets/rose-logo.png': ['rose-logo.png', 'image/png'],
+          '/assets/Courgette-Regular.ttf': ['fonts/Courgette-Regular.ttf', 'font/ttf'],
+          '/assets/Outfit-Variable.ttf': ['fonts/Outfit-Variable.ttf', 'font/ttf']
+        };
+        const [file, contentType] = assets[path];
+        response.writeHead(200, { 'Content-Type': contentType });
+        response.end(await readFile(new URL('../public/' + file, import.meta.url)));
         return true;
       }
       const sid = cookieValue(request, cookieName);
